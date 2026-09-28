@@ -1,0 +1,24 @@
+server:
+  port: 8082
+spring:
+  application:
+    name: location-service
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      acks: all
+      properties: {enable.idempotence: true}
+    consumer:
+      auto-offset-reset: earliest
+  data:
+    redis:
+      host: localhost
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus

@@ -1,0 +1,203 @@
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: ridehail-config}
+data:
+  SPRING_PROFILES_ACTIVE: prod
+  JWT_ISSUER_URI: https://identity.example.invalid/
+  JWT_AUDIENCE: ridehail-api
+  KAFKA_SECURITY_PROTOCOL: SSL
+  POSTGRES_SSL_MODE: verify-full
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  SPRING_DATA_REDIS_HOST: redis-master
+  SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ridehail
+  TRIP_URL: http://trip-service
+  LOCATION_URL: http://location-service
+  DRIVER_URL: http://driver-service
+  DRIVER_WS_URL: ws://driver-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: gateway, labels: {app: gateway}}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: gateway}}
+  template:
+    metadata: {labels: {app: gateway}}
+    spec:
+      containers:
+        - name: gateway
+          image: ridehail/gateway:1.0.0
+          ports: [{containerPort: 8080}]
+          envFrom:
+            - configMapRef: {name: ridehail-config}
+            - secretRef: {name: ridehail-secret}
+          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: 8080}, initialDelaySeconds: 20, periodSeconds: 5}
+          livenessProbe:  {httpGet: {path: /actuator/health/liveness, port: 8080}, initialDelaySeconds: 40, periodSeconds: 10}
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "1", memory: 768Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: gateway}
+spec:
+  selector: {app: gateway}
+  ports: [{port: 80, targetPort: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: trip-service, labels: {app: trip-service}}
+spec:
+  replicas: 3
+  selector: {matchLabels: {app: trip-service}}
+  template:
+    metadata: {labels: {app: trip-service}}
+    spec:
+      containers:
+        - name: trip-service
+          image: ridehail/trip-service:1.0.0
+          ports: [{containerPort: 8081}]
+          envFrom:
+            - configMapRef: {name: ridehail-config}
+            - secretRef: {name: ridehail-secret}
+          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: 8081}, initialDelaySeconds: 20, periodSeconds: 5}
+          livenessProbe:  {httpGet: {path: /actuator/health/liveness, port: 8081}, initialDelaySeconds: 40, periodSeconds: 10}
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "1", memory: 768Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: trip-service}
+spec:
+  selector: {app: trip-service}
+  ports: [{port: 80, targetPort: 8081}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: trip-service}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: trip-service}
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 65}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: location-service, labels: {app: location-service}}
+spec:
+  replicas: 3
+  selector: {matchLabels: {app: location-service}}
+  template:
+    metadata: {labels: {app: location-service}}
+    spec:
+      containers:
+        - name: location-service
+          image: ridehail/location-service:1.0.0
+          ports: [{containerPort: 8082}]
+          envFrom:
+            - configMapRef: {name: ridehail-config}
+            - secretRef: {name: ridehail-secret}
+          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: 8082}, initialDelaySeconds: 20, periodSeconds: 5}
+          livenessProbe:  {httpGet: {path: /actuator/health/liveness, port: 8082}, initialDelaySeconds: 40, periodSeconds: 10}
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "1", memory: 768Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: location-service}
+spec:
+  selector: {app: location-service}
+  ports: [{port: 80, targetPort: 8082}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: location-service}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: location-service}
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 65}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: driver-service, labels: {app: driver-service}}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: driver-service}}
+  template:
+    metadata: {labels: {app: driver-service}}
+    spec:
+      containers:
+        - name: driver-service
+          image: ridehail/driver-service:1.0.0
+          ports: [{containerPort: 8083}]
+          envFrom:
+            - configMapRef: {name: ridehail-config}
+            - secretRef: {name: ridehail-secret}
+          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: 8083}, initialDelaySeconds: 20, periodSeconds: 5}
+          livenessProbe:  {httpGet: {path: /actuator/health/liveness, port: 8083}, initialDelaySeconds: 40, periodSeconds: 10}
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "1", memory: 768Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: driver-service}
+spec:
+  selector: {app: driver-service}
+  ports: [{port: 80, targetPort: 8083}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: dispatch-service, labels: {app: dispatch-service}}
+spec:
+  replicas: 3
+  selector: {matchLabels: {app: dispatch-service}}
+  template:
+    metadata: {labels: {app: dispatch-service}}
+    spec:
+      containers:
+        - name: dispatch-service
+          image: ridehail/dispatch-service:1.0.0
+          ports: [{containerPort: 8084}]
+          envFrom:
+            - configMapRef: {name: ridehail-config}
+            - secretRef: {name: ridehail-secret}
+          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: 8084}, initialDelaySeconds: 20, periodSeconds: 5}
+          livenessProbe:  {httpGet: {path: /actuator/health/liveness, port: 8084}, initialDelaySeconds: 40, periodSeconds: 10}
+          resources:
+            requests: {cpu: 250m, memory: 384Mi}
+            limits: {cpu: "1", memory: 768Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: dispatch-service}
+spec:
+  selector: {app: dispatch-service}
+  ports: [{port: 80, targetPort: 8084}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: dispatch-service}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: dispatch-service}
+  minReplicas: 3
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 65}}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: ridehail}
+spec:
+  rules:
+    - http:
+        paths:
+          - {path: /, pathType: Prefix, backend: {service: {name: gateway, port: {number: 80}}}}

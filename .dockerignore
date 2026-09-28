@@ -1,0 +1,3 @@
+target/
+.git/
+k8s/

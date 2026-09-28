@@ -1,0 +1,33 @@
+server:
+  port: 8083
+spring:
+  application:
+    name: driver-service
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      acks: all
+      properties: {enable.idempotence: true}
+    consumer:
+      auto-offset-reset: earliest
+  datasource:
+    url: jdbc:postgresql://localhost:5432/ridehail
+    username: ridehail
+    password: ridehail
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    table: driver_flyway_history
+  data:
+    redis:
+      host: localhost
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus

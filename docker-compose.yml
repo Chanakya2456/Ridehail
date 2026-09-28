@@ -1,0 +1,48 @@
+x-svc: &svc
+  restart: unless-stopped
+  depends_on: [kafka, redis, postgres]
+  environment: &env
+    SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    SPRING_DATA_REDIS_HOST: redis
+    SPRING_DATA_REDIS_PORT: 6379
+    SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ridehail
+    SPRING_DATASOURCE_USERNAME: ridehail
+    SPRING_DATASOURCE_PASSWORD: ridehail
+    SPRING_PROFILES_ACTIVE: local
+
+services:
+  postgres:
+    image: postgres:16
+    environment: {POSTGRES_DB: ridehail, POSTGRES_USER: ridehail, POSTGRES_PASSWORD: ridehail}
+  redis:
+    image: redis:7
+  kafka:
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+  trip-service:     {<<: *svc, build: {context: ., args: {MODULE: trip-service}}}
+  location-service: {<<: *svc, build: {context: ., args: {MODULE: location-service}}}
+  dispatch-service: {<<: *svc, build: {context: ., args: {MODULE: dispatch-service}}}
+  driver-service:   {<<: *svc, build: {context: ., args: {MODULE: driver-service}}}
+  gateway:
+    build: {context: ., args: {MODULE: gateway}}
+    ports: ["8080:8080"]
+    depends_on: [trip-service, location-service, driver-service, redis]
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      TRIP_URL: http://trip-service:8081
+      LOCATION_URL: http://location-service:8082
+      DRIVER_URL: http://driver-service:8083
+      DRIVER_WS_URL: ws://driver-service:8083
