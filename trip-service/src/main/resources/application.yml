@@ -7,9 +7,17 @@ spring:
     bootstrap-servers: localhost:9092
     producer:
       acks: all
-      properties: {enable.idempotence: true}
+      properties:
+        enable.idempotence: true
+        delivery.timeout.ms: 120000
+        request.timeout.ms: 30000
+        max.block.ms: 10000
     consumer:
       auto-offset-reset: earliest
+      properties:
+        max.poll.interval.ms: 600000
+    listener:
+      concurrency: 2
   datasource:
     url: jdbc:postgresql://localhost:5432/ridehail
     username: ridehail

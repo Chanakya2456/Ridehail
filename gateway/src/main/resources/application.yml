@@ -8,16 +8,82 @@ spring:
       default-filters:
         - name: RequestRateLimiter
           args:
-            redis-rate-limiter.replenishRate: 10
-            redis-rate-limiter.burstCapacity: 30
+            redis-rate-limiter.replenishRate: ${RATE_LIMIT_CALLER_RPS:10}
+            redis-rate-limiter.burstCapacity: ${RATE_LIMIT_CALLER_BURST:30}
             key-resolver: "#{@principalOrAddressKeyResolver}"
+        - name: RequestRateLimiter
+          args:
+            redis-rate-limiter.replenishRate: ${RATE_LIMIT_IP_RPS:100}
+            redis-rate-limiter.burstCapacity: ${RATE_LIMIT_IP_BURST:300}
+            key-resolver: "#{@remoteAddressKeyResolver}"
       routes:
         - id: location
           uri: ${LOCATION_URL:http://localhost:8082}
-          predicates: [Path=/drivers/*/location]
+          predicates: [Path=/drivers/*/location, Method=POST]
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${RATE_LIMIT_LOCATION_RPS:2}
+                redis-rate-limiter.burstCapacity: ${RATE_LIMIT_LOCATION_BURST:5}
+                key-resolver: "#{@principalOrAddressKeyResolver}"
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${RATE_LIMIT_LOCATION_IP_RPS:30}
+                redis-rate-limiter.burstCapacity: ${RATE_LIMIT_LOCATION_IP_BURST:60}
+                key-resolver: "#{@remoteAddressKeyResolver}"
+        - id: trip-create
+          uri: ${TRIP_URL:http://localhost:8081}
+          predicates: [Path=/trips, Method=POST]
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${RATE_LIMIT_TRIP_CREATE_RPS:1}
+                redis-rate-limiter.burstCapacity: ${RATE_LIMIT_TRIP_CREATE_BURST:3}
+                key-resolver: "#{@principalOrAddressKeyResolver}"
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${RATE_LIMIT_TRIP_CREATE_IP_RPS:20}
+                redis-rate-limiter.burstCapacity: ${RATE_LIMIT_TRIP_CREATE_IP_BURST:40}
+                key-resolver: "#{@remoteAddressKeyResolver}"
         - id: trips
           uri: ${TRIP_URL:http://localhost:8081}
           predicates: [Path=/trips/**]
+        - id: driver-register
+          uri: ${DRIVER_URL:http://localhost:8083}
+          predicates: [Path=/drivers, Method=POST]
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${RATE_LIMIT_REGISTER_RPS:1}
+                redis-rate-limiter.burstCapacity: ${RATE_LIMIT_REGISTER_BURST:3}
+                key-resolver: "#{@remoteAddressKeyResolver}"
+        - id: driver-offer-poll
+          uri: ${DRIVER_URL:http://localhost:8083}
+          predicates: [Path=/drivers/*/offer, Method=GET]
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${RATE_LIMIT_OFFER_POLL_RPS:2}
+                redis-rate-limiter.burstCapacity: ${RATE_LIMIT_OFFER_POLL_BURST:5}
+                key-resolver: "#{@principalOrAddressKeyResolver}"
+        - id: driver-offer-accept
+          uri: ${DRIVER_URL:http://localhost:8083}
+          predicates: [Path=/drivers/*/offers/*/accept, Method=POST]
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${RATE_LIMIT_OFFER_RESPONSE_RPS:1}
+                redis-rate-limiter.burstCapacity: ${RATE_LIMIT_OFFER_RESPONSE_BURST:3}
+                key-resolver: "#{@principalOrAddressKeyResolver}"
+        - id: driver-offer-reject
+          uri: ${DRIVER_URL:http://localhost:8083}
+          predicates: [Path=/drivers/*/offers/*/reject, Method=POST]
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${RATE_LIMIT_OFFER_RESPONSE_RPS:1}
+                redis-rate-limiter.burstCapacity: ${RATE_LIMIT_OFFER_RESPONSE_BURST:3}
+                key-resolver: "#{@principalOrAddressKeyResolver}"
         - id: driver-ws
           uri: ${DRIVER_WS_URL:ws://localhost:8083}
           predicates: [Path=/ws/drivers/**]

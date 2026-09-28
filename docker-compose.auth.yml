@@ -1,0 +1,40 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3
+    command: ["start-dev", "--import-realm"]
+    ports: ["8180:8080"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    volumes:
+      - ./k8s/ridehail-realm.json:/opt/keycloak/data/import/ridehail-realm.json:ro
+
+  trip-service:
+    environment: &auth_env
+      SPRING_PROFILES_ACTIVE: prod
+      JWT_ISSUER_URI: http://keycloak:8080/realms/ridehail
+      JWT_AUDIENCE: ridehail-api
+      POSTGRES_SSL_MODE: disable
+      REDIS_SSL_ENABLED: "false"
+      KAFKA_SECURITY_PROTOCOL: PLAINTEXT
+    depends_on: [keycloak]
+  location-service:
+    environment: *auth_env
+    depends_on: [keycloak]
+  dispatch-service:
+    environment: *auth_env
+    depends_on: [keycloak]
+  driver-service:
+    environment: *auth_env
+    depends_on: [keycloak]
+  gateway:
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      JWT_ISSUER_URI: http://keycloak:8080/realms/ridehail
+      JWT_AUDIENCE: ridehail-api
+      REDIS_SSL_ENABLED: "false"
+      TRIP_URL: http://trip-service:8081
+      LOCATION_URL: http://location-service:8082
+      DRIVER_URL: http://driver-service:8083
+      DRIVER_WS_URL: ws://driver-service:8083
+    depends_on: [keycloak, trip-service, location-service, driver-service, redis]

@@ -29,7 +29,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /** Boots dispatch-service against real Kafka + Redis. Needs Docker. Each test uses its own latitude band (>5km apart). */
-@SpringBootTest(properties = {"dispatch.offer-ttl-ms=3000", "dispatch.retry-interval-ms=200", "dispatch.retry-attempts=5"})
+@SpringBootTest(properties = {"dispatch.offer-ttl-ms=3000", "dispatch.retry-max-retries=5",
+        "dispatch.retry-initial-interval-ms=200", "dispatch.retry-max-interval-ms=400"})
 @Testcontainers(disabledWithoutDocker = true)
 @Import(DispatchFlowTest.CollectorConfig.class)
 class DispatchFlowTest {
@@ -46,7 +47,7 @@ class DispatchFlowTest {
 
     public static class Collector {
         final Queue<ConsumerRecord<String, String>> records = new ConcurrentLinkedQueue<>();
-        @KafkaListener(topics = {DRIVER_OFFERED, DRIVER_ASSIGNED, DISPATCH_FAILED}, groupId = "it-collector",
+        @KafkaListener(topics = {DRIVER_OFFERED, DRIVER_ASSIGNED, DISPATCH_FAILED, TRIP_CREATED + ".DLT"}, groupId = "it-collector",
                        properties = "auto.offset.reset=earliest")
         public void on(ConsumerRecord<String, String> r) { records.add(r); }
     }
@@ -84,6 +85,13 @@ class DispatchFlowTest {
         UUID trip = UUID.randomUUID();
         requestTrip(trip, 30.0, 72.0);
         await().atMost(20, SECONDS).untilAsserted(() -> assertThat(failed(trip)).isTrue());
+    }
+
+    @Test void malformedTripIsSentToDeadLetterTopicWithoutRetrying() {
+        UUID trip = UUID.randomUUID();
+        kafka.send(TRIP_CREATED, trip.toString(), "not-json");
+        await().atMost(10, SECONDS).untilAsserted(() -> assertThat(collector.records.stream()
+                .anyMatch(r -> r.topic().equals(TRIP_CREATED + ".DLT") && trip.toString().equals(r.key()))).isTrue());
     }
 
     @Test void duplicateTripCreatedOffersOnce() {

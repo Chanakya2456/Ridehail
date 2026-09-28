@@ -1,203 +1,623 @@
+# Single-node, in-cluster development stack. Credentials and plaintext protocols
+# are intentionally demo-only; see README before using a shared/production cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ridehail
+---
 apiVersion: v1
 kind: ConfigMap
-metadata: {name: ridehail-config}
+metadata:
+  name: ridehail-config
 data:
   SPRING_PROFILES_ACTIVE: prod
-  JWT_ISSUER_URI: https://identity.example.invalid/
+  JWT_ISSUER_URI: http://keycloak:8080/realms/ridehail
   JWT_AUDIENCE: ridehail-api
-  KAFKA_SECURITY_PROTOCOL: SSL
-  POSTGRES_SSL_MODE: verify-full
+  KAFKA_SECURITY_PROTOCOL: PLAINTEXT
+  KAFKA_TOPIC_REPLICAS: "1"
   SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-  SPRING_DATA_REDIS_HOST: redis-master
+  SPRING_DATA_REDIS_HOST: redis
+  REDIS_SSL_ENABLED: "false"
+  POSTGRES_SSL_MODE: disable
   SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ridehail
-  TRIP_URL: http://trip-service
-  LOCATION_URL: http://location-service
-  DRIVER_URL: http://driver-service
-  DRIVER_WS_URL: ws://driver-service
+  TRIP_URL: http://trip-service:8081
+  LOCATION_URL: http://location-service:8082
+  DRIVER_URL: http://driver-service:8083
+  DRIVER_WS_URL: ws://driver-service:8083
 ---
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name: gateway, labels: {app: gateway}}
-spec:
-  replicas: 2
-  selector: {matchLabels: {app: gateway}}
-  template:
-    metadata: {labels: {app: gateway}}
-    spec:
-      containers:
-        - name: gateway
-          image: ridehail/gateway:1.0.0
-          ports: [{containerPort: 8080}]
-          envFrom:
-            - configMapRef: {name: ridehail-config}
-            - secretRef: {name: ridehail-secret}
-          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: 8080}, initialDelaySeconds: 20, periodSeconds: 5}
-          livenessProbe:  {httpGet: {path: /actuator/health/liveness, port: 8080}, initialDelaySeconds: 40, periodSeconds: 10}
-          resources:
-            requests: {cpu: 250m, memory: 384Mi}
-            limits: {cpu: "1", memory: 768Mi}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ridehail-app-secrets
+type: Opaque
+stringData:
+  SPRING_DATASOURCE_USERNAME: ridehail
+  SPRING_DATASOURCE_PASSWORD: ridehail-demo-only
+  POSTGRES_DB: ridehail
+  POSTGRES_USER: ridehail
+  POSTGRES_PASSWORD: ridehail-demo-only
+  REDIS_PASSWORD: redis-demo-only
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-config
+type: Opaque
+stringData:
+  redis.conf: |
+    bind 0.0.0.0
+    protected-mode yes
+    port 6379
+    appendonly yes
+    requirepass redis-demo-only
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-admin
+type: Opaque
+stringData:
+  KC_BOOTSTRAP_ADMIN_USERNAME: admin
+  KC_BOOTSTRAP_ADMIN_PASSWORD: admin-demo-only
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: gateway}
+metadata:
+  name: postgres
 spec:
-  selector: {app: gateway}
-  ports: [{port: 80, targetPort: 8080}]
+  clusterIP: None
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: {name: ridehail-app-secrets, key: POSTGRES_DB}
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: {name: ridehail-app-secrets, key: POSTGRES_USER}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: ridehail-app-secrets, key: POSTGRES_PASSWORD}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          startupProbe:
+            exec:
+              command: [sh, -c, pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"]
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: [sh, -c, pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"]
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: [sh, -c, pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"]
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: redis
+          image: redis:7
+          command: [redis-server, /etc/redis/redis.conf]
+          ports:
+            - name: redis
+              containerPort: 6379
+          startupProbe:
+            tcpSocket: {port: redis}
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            exec:
+              command: [sh, -c, REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli ping | grep -q PONG]
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: {port: redis}
+            periodSeconds: 10
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: ridehail-app-secrets, key: REDIS_PASSWORD}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/redis
+              readOnly: true
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          secret:
+            secretName: redis-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+spec:
+  clusterIP: None
+  selector:
+    app: kafka
+  ports:
+    - name: broker
+      port: 9092
+      targetPort: 9092
+    - name: controller
+      port: 9093
+      targetPort: 9093
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: kafka
+          image: apache/kafka:3.8.0
+          ports:
+            - name: broker
+              containerPort: 9092
+            - name: controller
+              containerPort: 9093
+          env:
+            - {name: KAFKA_CLUSTER_ID, value: MkU3OEVBNTcwNTJENDM2Qk}
+            - {name: KAFKA_NODE_ID, value: "1"}
+            - {name: KAFKA_PROCESS_ROLES, value: "broker,controller"}
+            - {name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093"}
+            - {name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka:9092"}
+            - {name: KAFKA_CONTROLLER_LISTENER_NAMES, value: CONTROLLER}
+            - {name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"}
+            - {name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@kafka:9093"}
+            - {name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1"}
+            - {name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1"}
+            - {name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1"}
+            - {name: KAFKA_LOG_DIRS, value: /var/lib/kafka/data}
+          startupProbe:
+            tcpSocket: {port: broker}
+            failureThreshold: 36
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket: {port: broker}
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: {port: broker}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}
+    - {name: management, port: 9000, targetPort: 9000}
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: trip-service, labels: {app: trip-service}}
+metadata:
+  name: keycloak
 spec:
-  replicas: 3
-  selector: {matchLabels: {app: trip-service}}
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
   template:
-    metadata: {labels: {app: trip-service}}
+    metadata:
+      labels:
+        app: keycloak
     spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.3.0
+          args: [start-dev, --import-realm]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: management, containerPort: 9000}
+          env:
+            - {name: KC_HEALTH_ENABLED, value: "true"}
+            - {name: KC_HOSTNAME, value: http://keycloak:8080}
+          envFrom:
+            - secretRef: {name: keycloak-admin}
+          startupProbe:
+            httpGet: {path: /health/ready, port: management}
+            failureThreshold: 36
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /health/ready, port: management}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health/live, port: management}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 500m, memory: 768Mi}
+            limits: {cpu: "2", memory: 1536Mi}
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import/ridehail-realm.json
+              subPath: ridehail-realm.json
+              readOnly: true
+      volumes:
+        - name: realm
+          configMap:
+            name: keycloak-realm
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: gateway
+          image: ridehail/gateway:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 8080}
+          envFrom:
+            - configMapRef: {name: ridehail-config}
+            - secretRef: {name: ridehail-app-secrets}
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            failureThreshold: 36
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 200m, memory: 256Mi}
+            limits: {cpu: "1", memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+spec:
+  selector: {app: gateway}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trip-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: trip-service}
+  template:
+    metadata:
+      labels: {app: trip-service}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: trip-service
           image: ridehail/trip-service:1.0.0
-          ports: [{containerPort: 8081}]
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8081}]
           envFrom:
             - configMapRef: {name: ridehail-config}
-            - secretRef: {name: ridehail-secret}
-          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: 8081}, initialDelaySeconds: 20, periodSeconds: 5}
-          livenessProbe:  {httpGet: {path: /actuator/health/liveness, port: 8081}, initialDelaySeconds: 40, periodSeconds: 10}
+            - secretRef: {name: ridehail-app-secrets}
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            failureThreshold: 36
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            periodSeconds: 10
           resources:
-            requests: {cpu: 250m, memory: 384Mi}
+            requests: {cpu: 200m, memory: 256Mi}
             limits: {cpu: "1", memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
 ---
 apiVersion: v1
 kind: Service
 metadata: {name: trip-service}
 spec:
   selector: {app: trip-service}
-  ports: [{port: 80, targetPort: 8081}]
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata: {name: trip-service}
-spec:
-  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: trip-service}
-  minReplicas: 3
-  maxReplicas: 10
-  metrics:
-    - type: Resource
-      resource: {name: cpu, target: {type: Utilization, averageUtilization: 65}}
+  ports: [{name: http, port: 8081, targetPort: http}]
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: location-service, labels: {app: location-service}}
+metadata:
+  name: location-service
 spec:
-  replicas: 3
-  selector: {matchLabels: {app: location-service}}
+  replicas: 2
+  selector:
+    matchLabels: {app: location-service}
   template:
-    metadata: {labels: {app: location-service}}
+    metadata:
+      labels: {app: location-service}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: location-service
           image: ridehail/location-service:1.0.0
-          ports: [{containerPort: 8082}]
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8082}]
           envFrom:
             - configMapRef: {name: ridehail-config}
-            - secretRef: {name: ridehail-secret}
-          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: 8082}, initialDelaySeconds: 20, periodSeconds: 5}
-          livenessProbe:  {httpGet: {path: /actuator/health/liveness, port: 8082}, initialDelaySeconds: 40, periodSeconds: 10}
+            - secretRef: {name: ridehail-app-secrets}
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            failureThreshold: 36
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            periodSeconds: 10
           resources:
-            requests: {cpu: 250m, memory: 384Mi}
+            requests: {cpu: 200m, memory: 256Mi}
             limits: {cpu: "1", memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
 ---
 apiVersion: v1
 kind: Service
 metadata: {name: location-service}
 spec:
   selector: {app: location-service}
-  ports: [{port: 80, targetPort: 8082}]
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata: {name: location-service}
-spec:
-  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: location-service}
-  minReplicas: 3
-  maxReplicas: 10
-  metrics:
-    - type: Resource
-      resource: {name: cpu, target: {type: Utilization, averageUtilization: 65}}
+  ports: [{name: http, port: 8082, targetPort: http}]
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: driver-service, labels: {app: driver-service}}
+metadata:
+  name: driver-service
 spec:
   replicas: 2
-  selector: {matchLabels: {app: driver-service}}
+  selector:
+    matchLabels: {app: driver-service}
   template:
-    metadata: {labels: {app: driver-service}}
+    metadata:
+      labels: {app: driver-service}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: driver-service
           image: ridehail/driver-service:1.0.0
-          ports: [{containerPort: 8083}]
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8083}]
           envFrom:
             - configMapRef: {name: ridehail-config}
-            - secretRef: {name: ridehail-secret}
-          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: 8083}, initialDelaySeconds: 20, periodSeconds: 5}
-          livenessProbe:  {httpGet: {path: /actuator/health/liveness, port: 8083}, initialDelaySeconds: 40, periodSeconds: 10}
+            - secretRef: {name: ridehail-app-secrets}
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            failureThreshold: 36
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            periodSeconds: 10
           resources:
-            requests: {cpu: 250m, memory: 384Mi}
+            requests: {cpu: 200m, memory: 256Mi}
             limits: {cpu: "1", memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
 ---
 apiVersion: v1
 kind: Service
 metadata: {name: driver-service}
 spec:
   selector: {app: driver-service}
-  ports: [{port: 80, targetPort: 8083}]
+  ports: [{name: http, port: 8083, targetPort: http}]
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: dispatch-service, labels: {app: dispatch-service}}
+metadata:
+  name: dispatch-service
 spec:
-  replicas: 3
-  selector: {matchLabels: {app: dispatch-service}}
+  replicas: 2
+  selector:
+    matchLabels: {app: dispatch-service}
   template:
-    metadata: {labels: {app: dispatch-service}}
+    metadata:
+      labels: {app: dispatch-service}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: dispatch-service
           image: ridehail/dispatch-service:1.0.0
-          ports: [{containerPort: 8084}]
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8084}]
           envFrom:
             - configMapRef: {name: ridehail-config}
-            - secretRef: {name: ridehail-secret}
-          readinessProbe: {httpGet: {path: /actuator/health/readiness, port: 8084}, initialDelaySeconds: 20, periodSeconds: 5}
-          livenessProbe:  {httpGet: {path: /actuator/health/liveness, port: 8084}, initialDelaySeconds: 40, periodSeconds: 10}
+            - secretRef: {name: ridehail-app-secrets}
+          startupProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            failureThreshold: 36
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: http}
+            periodSeconds: 10
           resources:
-            requests: {cpu: 250m, memory: 384Mi}
+            requests: {cpu: 200m, memory: 256Mi}
             limits: {cpu: "1", memory: 768Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
 ---
 apiVersion: v1
 kind: Service
 metadata: {name: dispatch-service}
 spec:
   selector: {app: dispatch-service}
-  ports: [{port: 80, targetPort: 8084}]
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata: {name: dispatch-service}
-spec:
-  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: dispatch-service}
-  minReplicas: 3
-  maxReplicas: 6
-  metrics:
-    - type: Resource
-      resource: {name: cpu, target: {type: Utilization, averageUtilization: 65}}
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata: {name: ridehail}
-spec:
-  rules:
-    - http:
-        paths:
-          - {path: /, pathType: Prefix, backend: {service: {name: gateway, port: {number: 80}}}}
+  ports: [{name: http, port: 8084, targetPort: http}]

@@ -81,7 +81,7 @@ class OfferPushListener {
     private final DriverSocketHandler handler;
     OfferPushListener(DriverSocketHandler handler) { this.handler = handler; }
 
-    @KafkaListener(topics = DRIVER_OFFERED, groupId = "driver-push-#{T(java.util.UUID).randomUUID()}",
+    @KafkaListener(topics = DRIVER_OFFERED, groupId = "driver-push-#{T(java.util.UUID).randomUUID()}", concurrency = "6",
                    properties = "auto.offset.reset=latest")
     void push(String msg) { handler.push(fromJson(msg, DriverOffered.class).driverId(), msg); }
 }

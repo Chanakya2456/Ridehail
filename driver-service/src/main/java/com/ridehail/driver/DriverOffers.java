@@ -12,11 +12,15 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.web.bind.annotation.*;
 import java.security.Principal;
+import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Driver-app facing API. In production push the offer (FCM/APNs/WebSocket); polling keeps this demo simple. */
 @RestController
 @RequestMapping("/drivers")
 class OfferController {
+    private static final Logger log = LoggerFactory.getLogger(OfferController.class);
     private final StringRedisTemplate redis;
     private final KafkaTemplate<String, String> kafka;
     OfferController(StringRedisTemplate redis, KafkaTemplate<String, String> kafka) { this.redis = redis; this.kafka = kafka; }
@@ -48,10 +52,20 @@ class OfferController {
         DriverOffered offer = fromJson(payload, DriverOffered.class);
         if (!tripId.equals(offer.tripId()) || offer.expiresAt() <= System.currentTimeMillis())
             return ResponseEntity.status(409).build();
-        redis.delete("driver:{" + id + "}:offer");
-        kafka.send(OFFER_RESPONDED, tripId.toString(), toJson(
-                new OfferResponded(tripId, id, accepted, accepted ? "ACCEPTED" : "REJECTED", System.currentTimeMillis())));
-        return ResponseEntity.accepted().build();   // final outcome: GET /trips/{id}
+        try {
+            kafka.send(OFFER_RESPONDED, tripId.toString(), toJson(
+                    new OfferResponded(tripId, id, accepted, accepted ? "ACCEPTED" : "REJECTED", System.currentTimeMillis())))
+                    .get(30, TimeUnit.SECONDS);
+            redis.delete("driver:{" + id + "}:offer");
+            return ResponseEntity.accepted().build();   // final outcome: GET /trips/{id}
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Interrupted while publishing offer response tripId={} driverId={}", tripId, id, e);
+            return ResponseEntity.status(503).build();
+        } catch (Exception e) {
+            log.warn("Could not publish offer response tripId={} driverId={}", tripId, id, e);
+            return ResponseEntity.status(503).build();
+        }
     }
 }
 

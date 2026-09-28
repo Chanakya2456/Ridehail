@@ -42,12 +42,32 @@ Kafka consumer group so whichever pod holds the socket sees the offer; no sticky
 reject → next driver, timeout → next driver, no drivers → `dispatch.failed`, duplicate `trip.created`, two trips racing for one driver.
 
 ## Kubernetes
+
+`kubectl apply -k k8s/` deploys the whole **single-node development stack** into the `ridehail` namespace: gateway, all four services, Keycloak with the demo realm, PostgreSQL, Redis, and Kafka. Postgres, Redis, and Kafka use StatefulSets with persistent volume claims. The API services run with JWT validation enabled. The bundled broker/database/provider use demo credentials and plaintext internal connections; this is not a production topology.
+
+Requirements: a Kubernetes cluster with a default dynamic `StorageClass`, at least 6 GiB of memory available, Docker, and kubectl. For Docker Desktop Kubernetes, build images into its Docker engine. For Minikube or Kind, load the locally built images into that cluster after building:
+
+```powershell
+$modules = @('gateway', 'trip-service', 'location-service', 'dispatch-service', 'driver-service')
+foreach ($module in $modules) {
+  docker build --build-arg MODULE=$module -t "ridehail/${module}:1.0.0" .
+}
+# Minikube: minikube image load ridehail/gateway:1.0.0 (repeat for each image)
+# Kind: kind load docker-image ridehail/gateway:1.0.0 (repeat for each image)
+kubectl apply -k k8s/
+kubectl get pods,pvc -n ridehail
 ```
-for m in gateway trip-service location-service dispatch-service driver-service; do
-  docker build --build-arg MODULE=$m -t ridehail/$m:1.0.0 . ; done
-# Kafka/Redis/Postgres: managed services or Strimzi / Bitnami charts; adjust k8s/ridehail.yaml ConfigMap hosts
-kubectl apply -f k8s/ridehail.yaml
+
+Wait until all pods are Ready, then expose the internal services from two terminals:
+
+```powershell
+kubectl -n ridehail port-forward svc/gateway 8080:80
+kubectl -n ridehail port-forward svc/keycloak 8180:8080
 ```
+
+The gateway is at `http://localhost:8080`; Keycloak is at `http://localhost:8180` (admin / admin-demo-only). For a passenger token, run the token request shown in [Local OIDC test provider](#local-oidc-test-provider), changing the URL to `http://localhost:8180` if needed. Demo rider and driver IDs are `p1` and `d1`.
+
+This manifest needs a cluster storage provisioner and built/pushed images; Kubernetes cannot create the cluster or a registry for you. It uses one Postgres pod, one Redis pod, and one Kafka broker without TLS, multiple replicas, or backup automation, so it provides no HA or disaster recovery. For production, use managed or properly clustered stateful services, external secret management, TLS, a real identity provider, ingress/WAF, network policies, PodDisruptionBudgets, backup/restore, and capacity-tested autoscaling. HPA is intentionally omitted because it requires a working metrics server and measured targets.
 
 ## Where the hard problems are handled
 | Problem | Handling |
@@ -56,9 +76,10 @@ kubectl apply -f k8s/ridehail.yaml
 | Duplicate / redelivered events | Reservation is idempotent per tripId; trip and driver updates are state-guarded |
 | Stale / out-of-order locations | Lua upsert rejects older `ts`; dispatch ignores drivers unseen >30s; scheduled atomic eviction >60s |
 | Lost events (DB write then Kafka crash) | Transactional outbox in trip-service, `FOR UPDATE SKIP LOCKED` so pods can share the drain |
-| No driver available / transient failures | Listener throws → 10 retries × 2s → `<topic>.DLT` |
-| Bad payloads | Non-retryable → straight to DLT |
-| Horizontal scale | Stateless services; topics have 6 partitions keyed by trip/driver id; HPA per service (dispatch max 6) |
+| No driver available | Dispatch retries with bounded exponential backoff; then publishes `dispatch.failed` as a business outcome |
+| Transient listener failures | 5 retries, starting at 500ms and capped at 4s; then publish to `<topic>.DLT` and confirm broker acknowledgement |
+| Bad payloads | Non-retryable → straight to DLT; malformed dispatch requests are not reported as no-driver outcomes |
+| Horizontal scale | Six Kafka partitions and two listener consumers per Trip/Driver/Dispatch pod; topic replication is configurable |
 | Crash after reserve, before assign | Reservation TTL (120s) frees the driver |
 | Accept vs timeout race | Both are `offer.responded` events keyed by tripId (ordered); first one to change `trip:{id}:current` wins, the other is a no-op |
 | Rejected driver re-offered same trip | Per-trip `excluded` set (its size also caps offers at 5) |
@@ -70,19 +91,41 @@ Compose sets `SPRING_PROFILES_ACTIVE=local`; this profile is for local developme
 The `prod` profile validates JWT issuer and `JWT_AUDIENCE` at the gateway and each service. Tokens need `passenger` or `driver` scopes and a stable `sub` equal to the passenger/driver ID:
 drivers can only update their own location, view their own profile/offers, and respond to their own offers; passengers can only view their own trips;
 only the assigned driver can complete a trip. Monitoring scrapes need the `monitoring` scope. Configure the identity provider and claims before deployment.
-WebSocket handshakes use same-origin defaults and must carry the driver's bearer token. The gateway rate-limits by token subject (or source address locally): 10 requests/second, burst 30.
+WebSocket handshakes use same-origin defaults and must carry the driver's bearer token.
 `POST /trips` accepts an `Idempotency-Key` up to 200 characters so client retries return the original trip.
+
+The gateway applies Redis-backed token buckets before proxying requests. Defaults are configurable with `RATE_LIMIT_*` environment variables. Each route has a caller bucket (authenticated subject, or source address for anonymous local requests) at 10 requests/second with a burst of 30, plus a source-address bucket at 100/second with a burst of 300. Sensitive operations have additional route-specific caller and/or source-address buckets: trip creation (1/second, burst 3; IP 20/second, burst 40), location updates (2/second, burst 5; IP 30/second, burst 60), driver registration (IP 1/second, burst 3), offer polling (2/second, burst 5), and offer responses (1/second, burst 3). Buckets are shared across gateway replicas through Redis. Rejected requests receive HTTP 429 and Spring Cloud Gateway's `X-RateLimit-*` headers. The built-in filters are route-scoped; these settings do not implement a single aggregate quota across every API route, a billing quota, or active WebSocket connection caps.
+
+The source address is taken from the network connection. Behind an ingress/load balancer, this may identify the proxy and combine unrelated clients into one bucket. Production ingress must provide a trusted client address, and the gateway must be configured to trust only that ingress; do not trust arbitrary client-supplied forwarding headers. Restrict direct access to backend services so callers cannot bypass gateway limits. These are starter quotas, not measured capacity targets: tune them using traffic and 429 metrics before production. Redis availability is part of the limiter's request path; the desired fail-open/fail-closed policy and its alerts still need an explicit operational decision.
+
+### Local OIDC test provider
+
+To exercise the authenticated `prod` security profile locally, use the included Keycloak realm (demo credentials only):
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.auth.yml up --build
+```
+
+Keycloak is available at `http://localhost:8180` (admin / admin). The demo users are `p1` / `passenger-pass`, `d1` / `driver-pass`, and `monitor` / `monitor-pass`. Request a token:
+
+```sh
+curl -X POST http://localhost:8180/realms/ridehail/protocol/openid-connect/token \
+  -H 'content-type: application/x-www-form-urlencoded' \
+  -d 'grant_type=password&client_id=ridehail-api&client_secret=ridehail-local-client-secret&username=p1&password=passenger-pass&scope=openid'
+```
+
+Use the returned `access_token` as `Authorization: Bearer <token>` at `http://localhost:8080`. The demo issuer, credentials, client secret, and HTTP endpoints are for local development only.
 
 PostgreSQL tables are created by Flyway and checked by Hibernate (`ddl-auto: validate`). Trip and driver services keep separate migration history tables.
 
 ## Production deployment requirements
 
-`k8s/ridehail.yaml` is a starting template, not a turnkey production cluster. Replace the example JWT issuer and create the referenced `ridehail-secret` through your cluster secret manager with `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`, and `REDIS_PASSWORD`.
+The included `k8s/ridehail.yaml` deploys a complete development stack, not a production cluster. Replace its demo secret values and ConfigMap before adapting it for a real deployment.
 Production profile defaults require TLS for PostgreSQL (`POSTGRES_SSL_MODE=verify-full`), Kafka (`KAFKA_SECURITY_PROTOCOL=SSL`) and Redis (`REDIS_SSL_ENABLED=true`).
 Mount trusted CA certificates where the JVM needs them. For SASL Kafka, set `KAFKA_SECURITY_PROTOCOL=SASL_SSL` and provide `KAFKA_SASL_MECHANISM` plus `KAFKA_SASL_JAAS_CONFIG` as a secret.
 Provide TLS ingress, managed/high-availability Kafka, Redis and PostgreSQL, network policies, backups/restore procedures, and resource-specific alerts. The sample Compose dependencies are single-node development services.
 
-Actuator Prometheus metrics and Kubernetes liveness/readiness probes are enabled. Kafka dead-letter recovery increments `ridehail.kafka.dlt.records` by service; Trip Service exports `ridehail.outbox.pending`.
+Actuator Prometheus metrics and Kubernetes liveness/readiness probes are enabled. Kafka dead-letter recovery increments `ridehail.kafka.dlt.records` by service; DLT topics retain records for 14 days. Trip Service exports `ridehail.outbox.pending`.
 Configure alerts for both, and maintain an operator-controlled DLT inspection/replay process. Remaining work before production includes broader cross-service failure tests,
 distributed tracing, richer dispatch business metrics, and reconciliation for partial failures between Redis, Kafka and PostgreSQL. The dispatch consumer uses blocking retries,
-which hold its partition during backoff. Prometheus must scrape with a `monitoring` scope token.
+which blocks that consumer during backoff; with two consumers per pod, a failed partition does not stall every partition assigned to that pod. Prometheus must scrape with a `monitoring` scope token.

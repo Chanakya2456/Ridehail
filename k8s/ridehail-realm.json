@@ -1,0 +1,78 @@
+{
+  "realm": "ridehail",
+  "enabled": true,
+  "sslRequired": "none",
+  "clients": [
+    {
+      "clientId": "ridehail-api",
+      "name": "Ridehail API",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "ridehail-local-client-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "defaultClientScopes": ["web-origins", "acr", "roles", "basic", "profile", "email", "ridehail-audience"]
+    }
+  ],
+  "clientScopes": [
+    {
+      "name": "ridehail-audience",
+      "protocol": "openid-connect",
+      "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"},
+      "protocolMappers": [
+        {
+          "name": "ridehail-api audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {"included.client.audience": "ridehail-api", "id.token.claim": "false", "access.token.claim": "true"}
+        },
+        {
+          "name": "API roles as scopes",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "usermodel.clientRoleMapping.clientId": "ridehail-api",
+            "claim.name": "scope",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "id": "p1", "username": "p1", "enabled": true,
+      "email": "p1@example.test", "emailVerified": true,
+      "credentials": [{"type": "password", "value": "passenger-pass", "temporary": false}],
+      "clientRoles": {"ridehail-api": ["passenger"]}
+    },
+    {
+      "id": "d1", "username": "d1", "enabled": true,
+      "email": "d1@example.test", "emailVerified": true,
+      "credentials": [{"type": "password", "value": "driver-pass", "temporary": false}],
+      "clientRoles": {"ridehail-api": ["driver"]}
+    },
+    {
+      "id": "monitor", "username": "monitor", "enabled": true,
+      "email": "monitor@example.test", "emailVerified": true,
+      "credentials": [{"type": "password", "value": "monitor-pass", "temporary": false}],
+      "clientRoles": {"ridehail-api": ["monitoring"]}
+    }
+  ],
+  "roles": {
+    "client": {
+      "ridehail-api": [
+        {"name": "passenger", "description": "Local passenger demo role"},
+        {"name": "driver", "description": "Local driver demo role"},
+        {"name": "monitoring", "description": "Local monitoring demo role"}
+      ]
+    }
+  }
+}

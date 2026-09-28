@@ -149,7 +149,7 @@ class OutboxPublisher {
     public void publish() {
         for (OutboxEvent e : repo.lockBatch()) {
             try {
-                kafka.send(e.topic, e.msgKey, e.payload).get(5, TimeUnit.SECONDS);
+                kafka.send(e.topic, e.msgKey, e.payload).get(30, TimeUnit.SECONDS);
                 e.sent = true;                       // at-least-once; consumers are idempotent
             } catch (Exception ex) {
                 log.warn("outbox publish failed, will retry: {}", ex.toString());

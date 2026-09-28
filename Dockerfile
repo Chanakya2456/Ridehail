@@ -9,4 +9,5 @@ FROM eclipse-temurin:21-jre
 ARG MODULE
 WORKDIR /app
 COPY --from=build /src/${MODULE}/target/*.jar app.jar
+USER 10001:10001
 ENTRYPOINT ["java","-XX:MaxRAMPercentage=75","-jar","/app/app.jar"]
