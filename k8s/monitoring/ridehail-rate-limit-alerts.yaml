@@ -1,0 +1,45 @@
+# Optional: requires Prometheus Operator CRDs and a Prometheus instance that
+# selects PrometheusRule resources from the ridehail namespace.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ridehail-rate-limit-alerts
+  namespace: ridehail
+  labels:
+    app.kubernetes.io/name: ridehail
+spec:
+  groups:
+    - name: ridehail.rate-limits
+      rules:
+        - alert: RidehailRateLimitRejectionsHigh
+          expr: sum(rate(ridehail_gateway_rate_limit_rejected_total[5m])) > 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Ridehail API rate-limit rejections are elevated
+            description: More than five requests per second have been rejected for ten minutes.
+        - alert: RidehailGatewayRateLimitRedisErrors
+          expr: increase(ridehail_gateway_rate_limit_redis_errors_total[5m]) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: Gateway rate limiter cannot reach Redis
+            description: The gateway fails closed with HTTP 503 when it cannot check Redis buckets.
+        - alert: RidehailDriverWebSocketRedisErrors
+          expr: increase(ridehail_driver_websocket_redis_errors_total[5m]) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: Driver WebSocket lease store has Redis errors
+            description: WebSocket connections may be rejected or closed until Redis recovers.
+        - alert: RidehailDriverWebSocketLimitRejectionsHigh
+          expr: sum(rate(ridehail_driver_websocket_rejected_total[5m])) > 2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Driver WebSocket connection rejections are elevated
+            description: Drivers are frequently attempting to open more than one live WebSocket session.
